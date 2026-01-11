@@ -9,8 +9,8 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, UnexpectedAlertPresentException
 
 from sqlalchemy.orm import Session
-from backend.database import SessionLocal
-from backend.models import Log
+from database import SessionLocal
+from models import Log
 
 # Class to handle Scraping
 class UnimedScraper:

@@ -111,7 +111,7 @@ def process_job(job: JobRequest):
         # Log critical failure to DB if scraper didn't catch it
         if scraper and scraper.db:
              try:
-                 from backend.models import Log
+                 from models import Log
                  scraper.db.add(Log(job_id=job.job_id, carteirinha_id=job.carteirinha_id, level="ERROR", message=f"Server Crash: {str(e)}"))
                  scraper.db.commit()
              except: pass
