@@ -4,11 +4,10 @@ import time
 import requests
 import logging
 from datetime import datetime, timedelta
-# Add parent dir to path to import backend modules
-sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
-from backend.database import SessionLocal
-from backend.models import Job, BaseGuia
+# Use local Worker modules (independent of backend)
+from database import SessionLocal
+from models import Job, BaseGuia, Log, Carteirinha
 
 # Configure Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -101,7 +100,6 @@ def dispatch():
                             # Log attempt
                             try:
                                 temp_log_session = SessionLocal()
-                                from backend.models import Log
                                 temp_log_session.add(Log(job_id=job_id, carteirinha_id=carteirinha_id, level="INFO", message=f"Dispatching to {url}"))
                                 temp_log_session.commit()
                                 temp_log_session.close()
