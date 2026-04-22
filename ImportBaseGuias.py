@@ -8,6 +8,9 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, UnexpectedAlertPresentException
 
+from bs4 import BeautifulSoup
+import html
+
 from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import Log
@@ -19,22 +22,28 @@ class UnimedScraper:
         self.username = os.environ.get("SGUCARD_LOGIN", "REC2209525")
         self.password = os.environ.get("SGUCARD_PASSWORD", "Unimed@2025")
         self.headless = os.environ.get("SGUCARD_HEADLESS", "false").lower() == "true"
-        self.db = db if db else SessionLocal()
+        # Removed long-lived self.db session to avoid stale transactions
         
     def log(self, message, level="INFO", job_id=None, carteirinha_id=None):
         print(f"[{level}] {message}")
-        if self.db:
-            try:
-                log_entry = Log(
-                    job_id=job_id,
-                    carteirinha_id=carteirinha_id,
-                    level=level,
-                    message=message
-                )
-                self.db.add(log_entry)
-                self.db.commit()
-            except Exception as e:
-                print(f"Failed to write log to DB: {e}")
+        # Use a fresh session for each log to avoid transaction issues
+        db = SessionLocal()
+        try:
+            log_entry = Log(
+                job_id=job_id,
+                carteirinha_id=carteirinha_id,
+                level=level,
+                message=message
+            )
+            db.add(log_entry)
+            db.commit()
+        except Exception as e:
+            # If Job ID is missing (deleted from DB), this will fail. We log locally and move on.
+            print(f"Failed to write log to DB: {e}")
+            try: db.rollback()
+            except: pass
+        finally:
+            db.close()
 
     def funccarteira(self, carteirinha):
         # carteirinha format example: 0064.8000.400948.00-5
@@ -58,8 +67,12 @@ class UnimedScraper:
         chrome_options = Options()
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
         chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-infobars")
         chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--disable-setuid-sandbox")
+        chrome_options.add_argument("--incognito")
+        chrome_options.add_argument("--no-first-run")
         if self.headless:
             chrome_options.add_argument("--headless")
         
@@ -196,9 +209,11 @@ class UnimedScraper:
                  # Close popup and return empty
                  self.driver.close()
                  self.driver.switch_to.window(self.driver.window_handles[0])
-                 return []
+                 self.log("Retorno guias", job_id=job_id, carteirinha_id=carteirinha_db_id)
+                 return {"valida_prestador": {"tipo_json": None, "guias": None}, "guias_scraped": []}
 
             collected_data = [] 
+            valida_guias = {}
             
             # Helper to check element presence
             def is_element_present(by, value):
@@ -269,15 +284,133 @@ class UnimedScraper:
                                     # Close popup and return what we have
                                     self.driver.close()
                                     self.driver.switch_to.window(self.driver.window_handles[0])
-                                    return collected_data
+                                    
+                                    tipo_json = "All Sucess"
+                                    if any(val.get("Vinculo_prestador") != "Guia Válida" for val in valida_guias.values()):
+                                        tipo_json = "Thered"
+                                    
+                                    if not valida_guias:
+                                        tipo_json = None
+                                        valida_guias_out = {}
+                                    else:
+                                        tipo_json = "All Sucess"
+                                        if any(val.get("Vinculo_prestador") != "Guia Válida" for val in valida_guias.values()):
+                                            tipo_json = "Thered"
+                                        valida_guias_out = valida_guias
+                                    return {
+                                        "valida_prestador": {"tipo_json": tipo_json, "guias": valida_guias_out},
+                                        "guias_scraped": collected_data
+                                    }
 
                                 # Click to details
                                 link_element = self.driver.find_element(By.XPATH, f'{row_xpath}/td[4]/a')
+                                
+                                try:
+                                    input_hidden = self.driver.find_element(By.XPATH, f'{row_xpath}//input[@name="HTML_HINT_ITEM"]')
+                                    raw_html = input_hidden.get_attribute("value")
+                                    decoded_html = html.unescape(raw_html)
+                                    soup = BeautifulSoup(decoded_html, "html.parser")
+                                    guide_codigo = soup.find("td", class_="hint-td-cd-item").get_text(strip=True)
+                                except Exception as e:
+                                    guide_codigo = ""
+                                    self.log(f"Failed to extract guide_codigo: {str(e)}", level="WARNING", job_id=job_id, carteirinha_id=carteirinha_db_id)
+                                
+                                try:
+                                    guide_numero = link_element.text.strip()
+                                except:
+                                    guide_numero = ""
+
                                 link_element.click()
-                                time.sleep(2)
+                                time.sleep(3)
                                 
                                 # Extract Details
                                 try:
+                                    try:
+                                        err_el = self.driver.find_element(By.ID, "label_error_redeAtendPrestEspec")
+                                        if err_el.is_displayed() or "block" in (err_el.get_attribute("style") or ""):
+                                            self.log(f"Row {idx} access denied by system, skipping.", job_id=job_id, carteirinha_id=carteirinha_db_id)
+                                            # Using the text from the error div if present, otherwise default
+                                            err_msg = err_el.text.strip()
+                                            if not err_msg:
+                                                err_msg = "Acesso negado pelo sistema restrito ao prestador"
+                                                
+                                            valida_guias[guide_numero] = {
+                                                "codigo_procedimento": guide_codigo,
+                                                "Vinculo_prestador": err_msg
+                                            }
+                                            # Also add to collected_data
+                                            collected_data.append({
+                                                "numero_guia": guide_numero,
+                                                "data_autorizacao": None,
+                                                "senha": None,
+                                                "validade_senha": None,
+                                                "codigo_procedimento": guide_codigo,
+                                                "qtde_solicitada": 0,
+                                                "qtde_autorizada": 0
+                                            })
+                                            try:
+                                                self.driver.execute_script("window.history.go(-1)")
+                                                time.sleep(1)
+                                            except: pass
+                                            continue
+                                    except NoSuchElementException:
+                                        pass
+                                    
+                                    # --- LAYER 2: API Verification (getErrosSapia) ---
+                                    try:
+                                        current_url = self.driver.current_url
+                                        if "CD_GUIA=" in current_url:
+                                            # Extract cdGuia
+                                            cdGuia = current_url.split("CD_GUIA=")[1].split("&")[0]
+                                            urlApi = f"https://sgucard.unimedgoiania.coop.br/cmagnet/servlet/getErrosSapia?cdGuia={cdGuia}"
+                                            
+                                            self.log(f"Layer 2 check for Guia {guide_numero} (cdGuia={cdGuia})", job_id=job_id, carteirinha_id=carteirinha_db_id)
+                                            
+                                            import requests
+                                            session = requests.Session()
+                                            for cookie in self.driver.get_cookies():
+                                                session.cookies.set(cookie['name'], cookie['value'])
+                                            
+                                            api_resp = session.get(urlApi, timeout=10)
+                                            if api_resp.status_code == 200:
+                                                try:
+                                                    api_data = api_resp.json()
+                                                    # Example: {"erros":[{"msg":"PRESTADOR INFORMADO NÃO PERTENCE A REDE DO BENEFICIÁRIO"}]}
+                                                    # Success: {"erros":[]}
+                                                    if api_data.get("erros") and len(api_data["erros"]) > 0:
+                                                        err_msg = api_data["erros"][0].get("msg", "Erro de rede identificado")
+                                                        self.log(f"Layer 2 Block: {err_msg}", level="WARNING", job_id=job_id, carteirinha_id=carteirinha_db_id)
+                                                        
+                                                        valida_guias[guide_numero] = {
+                                                            "codigo_procedimento": guide_codigo,
+                                                            "Vinculo_prestador": err_msg
+                                                        }
+                                                        
+                                                        # Also add to guias_scraped so dispatcher can sync it even if details were blocked
+                                                        collected_data.append({
+                                                            "numero_guia": guide_numero,
+                                                            "data_autorizacao": None,
+                                                            "senha": None,
+                                                            "validade_senha": None,
+                                                            "codigo_procedimento": guide_codigo,
+                                                            "qtde_solicitada": 0,
+                                                            "qtde_autorizada": 0
+                                                        })
+                                                        
+                                                        # Go back to table
+                                                        try:
+                                                            self.driver.execute_script("window.history.go(-1)")
+                                                            time.sleep(1)
+                                                        except: pass
+                                                        continue
+                                                except Exception as json_e:
+                                                    self.log(f"Failed to parse API JSON: {json_e}", level="ERROR", job_id=job_id, carteirinha_id=carteirinha_db_id)
+                                            else:
+                                                self.log(f"API Error {api_resp.status_code}", level="ERROR", job_id=job_id, carteirinha_id=carteirinha_db_id)
+                                    except Exception as api_e:
+                                        self.log(f"Layer 2 Error: {api_e}", level="ERROR", job_id=job_id, carteirinha_id=carteirinha_db_id)
+                                    # ------------------------------------------------
+                                    
                                     # Wait for detail view
                                     if is_element_present(By.XPATH, '//*[@id="Button_Voltar"]'):
                                         # Scrape details
@@ -295,12 +428,17 @@ class UnimedScraper:
                                             "data_autorizacao": data_auth,
                                             "senha": senha,
                                             "validade_senha": data_valid,
-                                            "codigo_terapia": cod_terapia,
+                                            "codigo_procedimento": cod_terapia,
                                             "qtde_solicitada": qtde_solic,
                                             "qtde_autorizada": qtde_aut,
                                             "status": "Autorizado"
                                         }
                                         collected_data.append(guia_data)
+                                        numero_chave = guide_numero or new_num_guia
+                                        valida_guias[numero_chave] = {
+                                            "codigo_procedimento": guide_codigo or cod_terapia,
+                                            "Vinculo_prestador": "Guia Válida"
+                                        }
                                         self.log(f"Scraped Guia {new_num_guia}", job_id=job_id, carteirinha_id=carteirinha_db_id)
                                         
                                         # Go Back
@@ -337,7 +475,24 @@ class UnimedScraper:
             self.driver.close()
             self.driver.switch_to.window(self.driver.window_handles[0])
             
-            return collected_data 
+            tipo_json = "All Sucess"
+            if any(val.get("Vinculo_prestador") != "Guia Válida" for val in valida_guias.values()):
+                tipo_json = "Thered"
+            
+            # Using dict mapping instead of array to map to arbitrary valid JSON struct
+            self.log("Retorno guias", job_id=job_id, carteirinha_id=carteirinha_db_id)
+            if not valida_guias:
+                tipo_json = None
+                valida_guias_out = {}
+            else:
+                tipo_json = "All Sucess"
+                if any(val.get("Vinculo_prestador") != "Guia Válida" for val in valida_guias.values()):
+                    tipo_json = "Thered"
+                valida_guias_out = valida_guias
+            return {
+                "valida_prestador": {"tipo_json": tipo_json, "guias": valida_guias_out},
+                "guias_scraped": collected_data
+            }
 
         except Exception as e:
             self.log(f"Error processing carteirinha: {e}", level="ERROR", job_id=job_id, carteirinha_id=carteirinha_db_id)

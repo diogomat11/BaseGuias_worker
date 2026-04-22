@@ -1,3 +1,4 @@
+# Python Version: 3.12 (Recommended)
 # Requirements for Worker (dispatcher.py + ImportBaseGuias.py)
 selenium>=4.0.0
 openpyxl>=3.0.0
@@ -8,3 +9,4 @@ requests>=2.31.0
 fastapi>=0.109.0
 uvicorn>=0.27.0
 pydantic>=2.5.0
+beautifulsoup4>=4.12.0

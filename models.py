@@ -3,6 +3,7 @@ Independent models for Worker
 Mirrors the backend models for tables the Worker needs access to
 """
 from sqlalchemy import Column, Integer, String, Date, DateTime, ForeignKey, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from database import Base
@@ -35,6 +36,7 @@ class Job(Base):
     priority = Column(Integer, default=0)
     locked_by = Column(Text)  # Server URL
     timeout = Column(DateTime(timezone=True))
+    valida_prestador = Column(JSONB, nullable=True)  # JSON de validacao do prestador
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -51,9 +53,10 @@ class BaseGuia(Base):
     data_autorizacao = Column(Date)
     senha = Column(Text)
     validade = Column(Date)
-    codigo_terapia = Column(Text)
+    codigo_procedimento = Column(Text)
     qtde_solicitada = Column(Integer)
     sessoes_autorizadas = Column(Integer)
+    valida_prestador = Column(JSONB, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -72,3 +75,15 @@ class Log(Base):
 
     job_rel = relationship("Job", back_populates="logs")
     carteirinha_rel = relationship("Carteirinha", back_populates="logs")
+
+class Procedimento(Base):
+    __tablename__ = "procedimentos"
+
+    id = Column(Integer, primary_key=True, index=True)
+    id_convenio = Column(Integer, index=True)
+    nome = Column(Text, nullable=False)
+    codigo_procedimento = Column(Text, index=True)
+    autorizacao = Column(Text)
+    status = Column(Text, default="ativo")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
